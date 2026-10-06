@@ -11,7 +11,7 @@ import type { Seedling } from '../types/seedling';
 import type { Planting } from '../types/planting';
 import type { Survey } from '../types/survey';
 import type { Replant, ReplantState } from '../types/replant';
-import { rateLevel } from './rate';
+import { effectiveSurvivalRate, rateLevel } from './rate';
 import { nowIso, today } from './id';
 import { seedDatabase } from './seed';
 
@@ -194,7 +194,15 @@ export async function listSurveysByPlot(plotId: string): Promise<Survey[]> {
 }
 
 export async function putSurvey(row: Survey): Promise<void> {
-  const grade = row.gradeManual ? row.grade : rateLevel(row.survivalRate);
+  // grade 是「生效等级」的缓存：有复测更正时按复测株数重算生效成活率再判定；
+  // 人工复核锁定的等级（gradeManual）保持不变，不随复测刷新。
+  let rate = row.survivalRate;
+  if (row.recheck !== undefined) {
+    const plantings = await db.plantings.where('plotId').equals(row.plotId).toArray();
+    const total = plantings.reduce((acc, item) => acc + item.count, 0);
+    rate = effectiveSurvivalRate(row, total);
+  }
+  const grade = row.gradeManual ? row.grade : rateLevel(rate);
   await db.surveys.put({ ...row, grade, updatedAt: nowIso(), revision: ROW_REVISION });
 }
 
@@ -256,12 +264,15 @@ export async function applyReplantCompletion(replantId: string): Promise<void> {
     const surveys = await db.surveys.where('plotId').equals(plot.id).toArray();
     if (surveys.length === 0) return;
     const latest = surveys.reduce((acc, item) => (item.round > acc.round ? item : acc));
-    // 补植后按「原成活株数 + 本次补植株数」重新计算成活率
-    const aliveAfter = latest.aliveCount + replant.missingCount;
+    // 补植后按「生效成活株数 + 本次补植株数」重新计算成活率：
+    // 该测次有复测更正时补在复测值上（初录读数保持不动），否则补在初录值上
+    const baseAlive = latest.recheck?.aliveCount ?? latest.aliveCount;
+    const aliveAfter = baseAlive + replant.missingCount;
     const rate = total > 0 ? Math.round(Math.min(100, (aliveAfter / total) * 100) * 10) / 10 : latest.survivalRate;
     await db.surveys.update(latest.id, {
-      aliveCount: aliveAfter,
-      survivalRate: rate,
+      ...(latest.recheck !== undefined
+        ? { recheck: { ...latest.recheck, aliveCount: aliveAfter } }
+        : { aliveCount: aliveAfter, survivalRate: rate }),
       grade: latest.gradeManual ? latest.grade : rateLevel(rate),
       updatedAt: nowIso(),
     });

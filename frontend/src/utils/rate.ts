@@ -5,7 +5,7 @@
  * - 栽植密度合理性校验阈值
  * - 株高增幅与补植建议
  */
-import { RATE_LEVEL_LABEL, type RateLevel } from '../types/survey';
+import { RATE_LEVEL_LABEL, type RateLevel, type Survey } from '../types/survey';
 
 /** 1 亩 = 666.6667 平方米 */
 export const MU_TO_M2 = 666.6667;
@@ -52,6 +52,28 @@ export function rateLevel(rate: number): RateLevel {
   if (rate >= SURVIVAL_GOOD_RATE) return 'good';
   if (rate >= SURVIVAL_WARN_RATE) return 'fair';
   return 'poor';
+}
+
+/* ------------------------------ 生效值口径 ------------------------------ */
+/* 复测更正不改写初录读数；页面与统计统一走下面这组生效值函数。 */
+
+/** 生效成活株数：有复测更正取复测值，否则取初录值 */
+export function effectiveAliveCount(survey: Survey): number {
+  return survey.recheck?.aliveCount ?? survey.aliveCount;
+}
+
+/** 生效平均株高（cm）：有复测更正取复测值，否则取初录值 */
+export function effectiveAvgHeightCm(survey: Survey): number {
+  return survey.recheck?.avgHeightCm ?? survey.avgHeightCm;
+}
+
+/**
+ * 生效成活率（%）：有复测更正时按复测株数 / 栽植总株数重算，否则沿用初录派生值。
+ * 栽植总株数为 0 时回落到已存的 survivalRate，避免除零。
+ */
+export function effectiveSurvivalRate(survey: Survey, totalCount: number): number {
+  if (totalCount > 0) return calcSurvivalRate(effectiveAliveCount(survey), totalCount);
+  return survey.survivalRate;
 }
 
 /** 等级中文名 */

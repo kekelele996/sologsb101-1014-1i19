@@ -11,6 +11,7 @@ import {
   Card,
   DatePicker,
   Form,
+  Input,
   InputNumber,
   Modal,
   Popconfirm,
@@ -18,10 +19,12 @@ import {
   Space,
   Table,
   Tag,
+  Tooltip,
   Typography,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import {
+  AuditOutlined,
   DeleteOutlined,
   EditOutlined,
   ExperimentOutlined,
@@ -39,7 +42,7 @@ import { usePlotStore } from '../stores/plotStore';
 import { useSurveyStore } from '../stores/surveyStore';
 import { db } from '../utils/db';
 import { RATE_LEVEL_LABEL, RATE_LEVEL_OPTIONS, type RateLevel, type Survey } from '../types/survey';
-import { SURVIVAL_WARN_RATE, percentText } from '../utils/rate';
+import { SURVIVAL_WARN_RATE, calcSurvivalRate, effectiveAliveCount, effectiveAvgHeightCm, percentText } from '../utils/rate';
 
 interface SurveyFormValues {
   plotId: string;
@@ -47,6 +50,13 @@ interface SurveyFormValues {
   date: Dayjs;
   aliveCount: number;
   avgHeightCm: number;
+}
+
+interface RecheckFormValues {
+  date: Dayjs;
+  aliveCount: number;
+  avgHeightCm: number;
+  note: string;
 }
 
 export default function SurveyBoard() {
@@ -67,6 +77,7 @@ export default function SurveyBoard() {
   const createSurvey = useSurveyStore((state) => state.createSurvey);
   const updateSurvey = useSurveyStore((state) => state.updateSurvey);
   const deleteSurvey = useSurveyStore((state) => state.deleteSurvey);
+  const recheckSurvey = useSurveyStore((state) => state.recheckSurvey);
   const surveyRevision = useSurveyStore((state) => state.revision);
 
   const { rows, loading, remove } = useIdbTable<Survey>(db.surveys, { sortByUpdatedAt: false });
@@ -75,6 +86,10 @@ export default function SurveyBoard() {
   const [editing, setEditing] = useState<Survey | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [form] = Form.useForm<SurveyFormValues>();
+  const [recheckOpen, setRecheckOpen] = useState(false);
+  const [recheckTarget, setRecheckTarget] = useState<Survey | null>(null);
+  const [recheckSubmitting, setRecheckSubmitting] = useState(false);
+  const [recheckForm] = Form.useForm<RecheckFormValues>();
 
   const filtered = useMemo(() => {
     void surveyRevision;
@@ -180,6 +195,43 @@ export default function SurveyBoard() {
     message.success(`已把 ${count} 条记录的成活率等级调整为「${RATE_LEVEL_LABEL[gradeDraft]}」`);
   };
 
+  const openRecheck = (row: Survey): void => {
+    setRecheckTarget(row);
+    // 已有复测更正则回显现值，重复提交整体覆盖（以最后一次为准）
+    recheckForm.setFieldsValue({
+      date: row.recheck !== undefined ? dayjs(row.recheck.date) : dayjs(),
+      aliveCount: row.recheck?.aliveCount ?? row.aliveCount,
+      avgHeightCm: row.recheck?.avgHeightCm ?? row.avgHeightCm,
+      note: row.recheck?.note ?? '',
+    });
+    setRecheckOpen(true);
+  };
+
+  const handleRecheckSubmit = async (): Promise<void> => {
+    if (recheckTarget === null) return;
+    try {
+      const values = await recheckForm.validateFields();
+      setRecheckSubmitting(true);
+      await recheckSurvey(recheckTarget.id, {
+        date: values.date.format('YYYY-MM-DD'),
+        aliveCount: values.aliveCount,
+        avgHeightCm: values.avgHeightCm,
+        note: values.note.trim(),
+      });
+      const rate = calcSurvivalRate(values.aliveCount, statOf(recheckTarget.plotId).plantTotal);
+      message.success(`第 ${recheckTarget.round} 测次复测更正已保存，生效成活率 ${rate}%`);
+      if (rate < SURVIVAL_WARN_RATE) {
+        message.warning(`复测后成活率 ${rate}% 低于告警阈值 ${SURVIVAL_WARN_RATE}%，建议生成补植计划`, 6);
+      }
+      setRecheckOpen(false);
+      setRecheckTarget(null);
+    } catch (error) {
+      if (error instanceof Error) message.error(error.message);
+    } finally {
+      setRecheckSubmitting(false);
+    }
+  };
+
   const handleGenerateReplant = async (): Promise<void> => {
     const plotId = filters.plotId !== 'all' ? filters.plotId : plots.length > 0 ? plots[0].id : '';
     if (plotId === '') {
@@ -218,9 +270,21 @@ export default function SurveyBoard() {
       title: '成活株数',
       dataIndex: 'aliveCount',
       key: 'aliveCount',
-      width: 110,
+      width: 130,
       align: 'right',
-      render: (value: number) => value.toLocaleString('zh-CN'),
+      render: (_value: number, record) => {
+        const alive = effectiveAliveCount(record);
+        return (
+          <Space direction="vertical" size={0} style={{ alignItems: 'flex-end' }}>
+            <span>{alive.toLocaleString('zh-CN')}</span>
+            {record.recheck !== undefined ? (
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                初录 {record.aliveCount.toLocaleString('zh-CN')}
+              </Typography.Text>
+            ) : null}
+          </Space>
+        );
+      },
     },
     {
       title: '成活率',
@@ -230,11 +294,22 @@ export default function SurveyBoard() {
         const summary = summaryOf(record.plotId);
         const point = summary.points.find((item) => item.surveyId === record.id);
         return (
-          <RateTag
-            rate={point?.rate ?? record.survivalRate}
-            level={point?.level ?? record.grade}
-            manual={record.gradeManual}
-          />
+          <Space direction="vertical" size={2} style={{ alignItems: 'flex-start' }}>
+            <RateTag
+              rate={point?.rate ?? record.survivalRate}
+              level={point?.level ?? record.grade}
+              manual={record.gradeManual}
+            />
+            {record.recheck !== undefined ? (
+              <Tooltip
+                title={`复测 ${record.recheck.date}：${record.recheck.note}（初录成活率 ${percentText(record.survivalRate)}）`}
+              >
+                <Tag color="orange" style={{ margin: 0 }}>
+                  复测更正
+                </Tag>
+              </Tooltip>
+            ) : null}
+          </Space>
         );
       },
     },
@@ -244,20 +319,21 @@ export default function SurveyBoard() {
       key: 'avgHeightCm',
       width: 128,
       align: 'right',
-      render: (value: number, record) => {
+      render: (_value: number, record) => {
+        const height = effectiveAvgHeightCm(record);
         const summary = summaryOf(record.plotId);
         const index = summary.points.findIndex((item) => item.surveyId === record.id);
         const previous = index > 0 ? summary.points[index - 1] : null;
         return (
           <Space direction="vertical" size={0} style={{ alignItems: 'flex-end' }}>
-            <span>{value} cm</span>
+            <span>{height} cm</span>
             {previous !== null ? (
               <Typography.Text
-                type={value >= previous.avgHeightCm ? 'success' : 'danger'}
+                type={height >= previous.avgHeightCm ? 'success' : 'danger'}
                 style={{ fontSize: 12 }}
               >
-                {value >= previous.avgHeightCm ? <RiseOutlined /> : <FallOutlined />}{' '}
-                {Math.abs(Math.round((value - previous.avgHeightCm) * 10) / 10)} cm
+                {height >= previous.avgHeightCm ? <RiseOutlined /> : <FallOutlined />}{' '}
+                {Math.abs(Math.round((height - previous.avgHeightCm) * 10) / 10)} cm
               </Typography.Text>
             ) : null}
           </Space>
@@ -274,11 +350,14 @@ export default function SurveyBoard() {
     {
       title: '操作',
       key: 'action',
-      width: 150,
+      width: 230,
       render: (_value, record) => (
         <Space size={4}>
           <Button size="small" type="link" icon={<EditOutlined />} onClick={() => openEdit(record)}>
             编辑
+          </Button>
+          <Button size="small" type="link" icon={<AuditOutlined />} onClick={() => openRecheck(record)}>
+            {record.recheck !== undefined ? '改复测' : '复测'}
           </Button>
           <Popconfirm
             title="确认删除该测次记录？"
@@ -492,6 +571,70 @@ export default function SurveyBoard() {
           </Space>
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
             成活率 = 成活株数 / 该地块栽植总株数，保存时自动计算；成活率低于 {SURVIVAL_WARN_RATE}% 会给出告警提示。
+          </Typography.Text>
+        </Form>
+      </Modal>
+
+      <Modal
+        title={recheckTarget === null ? '复测更正' : `复测更正 · 第 ${recheckTarget.round} 测次`}
+        open={recheckOpen}
+        onCancel={() => {
+          setRecheckOpen(false);
+          setRecheckTarget(null);
+        }}
+        onOk={() => void handleRecheckSubmit()}
+        confirmLoading={recheckSubmitting}
+        okText="保存复测"
+        cancelText="取消"
+      >
+        {recheckTarget !== null ? (
+          <Alert
+            type="info"
+            showIcon
+            style={{ marginBottom: 14 }}
+            message={`初录读数（${recheckTarget.date}）：成活 ${recheckTarget.aliveCount.toLocaleString('zh-CN')} 株 · 株高 ${recheckTarget.avgHeightCm} cm · 成活率 ${percentText(recheckTarget.survivalRate)}`}
+            description="初录读数保留备查、不会被改写；保存后该测次的成活率、等级、告警与地块台账、导出汇总均按复测值计算。"
+          />
+        ) : null}
+        <Form form={recheckForm} layout="vertical">
+          <Space size={12} style={{ display: 'flex' }}>
+            <Form.Item
+              name="date"
+              label="复测日期"
+              style={{ flex: 1 }}
+              rules={[{ required: true, message: '请选择复测日期' }]}
+            >
+              <DatePicker style={{ width: '100%' }} />
+            </Form.Item>
+            <Form.Item
+              name="aliveCount"
+              label="复测成活株数"
+              style={{ flex: 1 }}
+              rules={[{ required: true, message: '请填写复测成活株数' }]}
+            >
+              <InputNumber min={0} max={500000} step={10} style={{ width: '100%' }} />
+            </Form.Item>
+            <Form.Item
+              name="avgHeightCm"
+              label="复测株高（cm）"
+              style={{ flex: 1 }}
+              rules={[{ required: true, message: '请填写复测株高' }]}
+            >
+              <InputNumber min={0} max={2000} step={1} style={{ width: '100%' }} />
+            </Form.Item>
+          </Space>
+          <Form.Item
+            name="note"
+            label="更正说明"
+            rules={[
+              { required: true, message: '请填写更正说明' },
+              { max: 120, message: '更正说明不超过 120 字' },
+            ]}
+          >
+            <Input.TextArea rows={2} placeholder="如：水准仪高程偏差，复测更正成活株数与株高" />
+          </Form.Item>
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            一条测次只保留最近一次复测更正，重复提交以最后一次为准；若该测次等级已经人工复核锁定，复测不会改写等级。
           </Typography.Text>
         </Form>
       </Modal>

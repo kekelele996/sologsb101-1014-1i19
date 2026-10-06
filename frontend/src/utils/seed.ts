@@ -122,10 +122,28 @@ export async function seedDatabase(): Promise<void> {
   };
 
   // ---------------- 验收记录（每地块 2–3 个测次） ----------------
+  // survey-a3 附带一条复测更正：初录读数保留不动，页面与统计按复测值生效
   const surveys: Survey[] = [
     surveyRow({ id: 'survey-a1', plotId: SEED_IDS.plotA, round: 1, date: '2024-06-20', aliveCount: 4680, avgHeightCm: 62 }, totalByPlot[SEED_IDS.plotA]),
     surveyRow({ id: 'survey-a2', plotId: SEED_IDS.plotA, round: 2, date: '2024-09-18', aliveCount: 4420, avgHeightCm: 78 }, totalByPlot[SEED_IDS.plotA]),
-    surveyRow({ id: 'survey-a3', plotId: SEED_IDS.plotA, round: 3, date: '2025-03-15', aliveCount: 4108, avgHeightCm: 96 }, totalByPlot[SEED_IDS.plotA]),
+    surveyRow(
+      {
+        id: 'survey-a3',
+        plotId: SEED_IDS.plotA,
+        round: 3,
+        date: '2025-03-15',
+        aliveCount: 4108,
+        avgHeightCm: 96,
+        recheck: {
+          date: '2025-03-22',
+          aliveCount: 4160,
+          avgHeightCm: 97,
+          note: '水准仪高程偏差导致初录漏计，复测更正成活株数与株高',
+          recordedAt: SEED_TIME,
+        },
+      },
+      totalByPlot[SEED_IDS.plotA],
+    ),
     surveyRow({ id: 'survey-b1', plotId: SEED_IDS.plotB, round: 1, date: '2024-07-05', aliveCount: 2772, avgHeightCm: 41 }, totalByPlot[SEED_IDS.plotB]),
     surveyRow({ id: 'survey-b2', plotId: SEED_IDS.plotB, round: 2, date: '2024-10-12', aliveCount: 2112, avgHeightCm: 55 }, totalByPlot[SEED_IDS.plotB]),
     surveyRow({ id: 'survey-c1', plotId: SEED_IDS.plotC, round: 1, date: '2024-05-28', aliveCount: 7680, avgHeightCm: 70 }, totalByPlot[SEED_IDS.plotC]),

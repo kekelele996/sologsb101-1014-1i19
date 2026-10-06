@@ -9,25 +9,33 @@ import type { Planting } from '../types/planting';
 import { db, initDatabase } from '../utils/db';
 import {
   SURVIVAL_WARN_RATE,
-  calcSurvivalRate,
+  effectiveAliveCount,
+  effectiveAvgHeightCm,
+  effectiveSurvivalRate,
   heightGrowth,
   rateLevel,
   round1,
   suggestReplantCount,
 } from '../utils/rate';
 
-/** 单个测次的成活率数据点 */
+/** 单个测次的成活率数据点（数值均为生效口径：有复测取复测，否则取初录） */
 export interface SurvivalPoint {
   surveyId: string;
   round: number;
   date: string;
+  /** 生效成活株数 */
   aliveCount: number;
+  /** 生效平均株高（cm） */
   avgHeightCm: number;
-  /** 该测次的成活率（%） */
+  /** 该测次的生效成活率（%） */
   rate: number;
   /** 是否被人工复核过等级 */
   gradeManual: boolean;
   level: RateLevel;
+  /** 是否带复测更正 */
+  rechecked: boolean;
+  /** 复测日期（无复测时为 null） */
+  recheckDate: string | null;
 }
 
 /** 单个地块的成活率派生汇总 */
@@ -72,16 +80,19 @@ export function buildSurvivalSummary(
     .filter((row) => row.plotId === plotId)
     .sort((a, b) => a.round - b.round)
     .map((row) => {
-      const rate = totalCount > 0 ? calcSurvivalRate(row.aliveCount, totalCount) : row.survivalRate;
+      // 生效口径：有复测更正的测次按复测株数派生成活率，初录读数仅留痕不参与计算
+      const rate = effectiveSurvivalRate(row, totalCount);
       return {
         surveyId: row.id,
         round: row.round,
         date: row.date,
-        aliveCount: row.aliveCount,
-        avgHeightCm: row.avgHeightCm,
+        aliveCount: effectiveAliveCount(row),
+        avgHeightCm: effectiveAvgHeightCm(row),
         rate,
         gradeManual: row.gradeManual,
         level: row.gradeManual ? row.grade : rateLevel(rate),
+        rechecked: row.recheck !== undefined,
+        recheckDate: row.recheck?.date ?? null,
       };
     });
 

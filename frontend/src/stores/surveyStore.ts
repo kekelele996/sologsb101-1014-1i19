@@ -4,7 +4,7 @@
  * 成活率派生值统一由 hooks/useSurvivalRate 的纯函数产出，避免口径分散。
  */
 import { create } from 'zustand';
-import type { RateLevel, Survey } from '../types/survey';
+import type { RateLevel, RecheckDraft, Survey } from '../types/survey';
 import { db, initDatabase, patchSurveyGrades, putSurvey, removeSurvey } from '../utils/db';
 import type { SurvivalSummary } from '../hooks/useSurvivalRate';
 import { nowIso, uuid } from '../utils/id';
@@ -40,6 +40,11 @@ interface SurveyStoreState {
   createSurvey: (draft: SurveyDraft) => Promise<Survey>;
   updateSurvey: (surveyId: string, draft: SurveyDraft) => Promise<void>;
   deleteSurvey: (surveyId: string) => Promise<void>;
+  /**
+   * 复测更正：在测次上挂 recheck（一条测次最多一条，重复提交以最后一次为准）。
+   * 初录读数不改写；保存后成活率、等级、告警与汇总均按复测值生效。
+   */
+  recheckSurvey: (surveyId: string, draft: RecheckDraft) => Promise<void>;
   /** 批量调整成活率等级（人工复核） */
   bulkApplyGrade: (level: RateLevel) => Promise<number>;
   /** 按最新测次生成补植计划（回写地块缺株数） */
@@ -126,6 +131,23 @@ export const useSurveyStore = create<SurveyStoreState>((set, get) => ({
   async deleteSurvey(surveyId) {
     await removeSurvey(surveyId);
     set({ selectedIds: get().selectedIds.filter((id) => id !== surveyId), revision: get().revision + 1 });
+  },
+
+  async recheckSurvey(surveyId, draft) {
+    const existing = await db.surveys.get(surveyId);
+    if (!existing) return;
+    // 单对象整体替换即「以最后一次为准」；初录字段原样保留，grade 缓存由 putSurvey 按生效值重算
+    await putSurvey({
+      ...existing,
+      recheck: {
+        date: draft.date,
+        aliveCount: draft.aliveCount,
+        avgHeightCm: draft.avgHeightCm,
+        note: draft.note,
+        recordedAt: nowIso(),
+      },
+    });
+    set({ revision: get().revision + 1 });
   },
 
   async bulkApplyGrade(level) {
