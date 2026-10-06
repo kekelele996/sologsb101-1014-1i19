@@ -4,12 +4,19 @@
  * 成活率派生值统一由 hooks/useSurvivalRate 的纯函数产出，避免口径分散。
  */
 import { create } from 'zustand';
-import type { RateLevel, Survey } from '../types/survey';
-import { db, initDatabase, patchSurveyGrades, putSurvey, removeSurvey } from '../utils/db';
+import type { RateLevel, Survey, SurveyDraft, SurveyRetestDraft } from '../types/survey';
+import {
+  clearSurveyRetest,
+  db,
+  initDatabase,
+  patchSurveyGrades,
+  putSurvey,
+  putSurveyRetest,
+  removeSurvey,
+} from '../utils/db';
 import type { SurvivalSummary } from '../hooks/useSurvivalRate';
 import { nowIso, uuid } from '../utils/id';
 import { calcSurvivalRate, rateLevel } from '../utils/rate';
-import type { SurveyDraft } from '../types/survey';
 import { usePlotStore } from './plotStore';
 
 /** 验收筛选条件（地块 + 等级 + 关键字 + 日期区间） */
@@ -39,6 +46,10 @@ interface SurveyStoreState {
   setGradeDraft: (level: RateLevel) => void;
   createSurvey: (draft: SurveyDraft) => Promise<Survey>;
   updateSurvey: (surveyId: string, draft: SurveyDraft) => Promise<void>;
+  /** 登记 / 覆盖复测更正（一条测次至多一份，以最后一次为准；初录读数保留不动） */
+  saveRetest: (surveyId: string, draft: SurveyRetestDraft) => Promise<void>;
+  /** 清除复测更正，该测次恢复按初录生效 */
+  deleteRetest: (surveyId: string) => Promise<void>;
   deleteSurvey: (surveyId: string) => Promise<void>;
   /** 批量调整成活率等级（人工复核） */
   bulkApplyGrade: (level: RateLevel) => Promise<number>;
@@ -97,6 +108,7 @@ export const useSurveyStore = create<SurveyStoreState>((set, get) => ({
       survivalRate,
       grade: rateLevel(survivalRate),
       gradeManual: false,
+      retest: null,
       createdAt: stamp,
       updatedAt: stamp,
       revision: 2,
@@ -111,6 +123,7 @@ export const useSurveyStore = create<SurveyStoreState>((set, get) => ({
     if (!existing) return;
     const total = totalPlantedOf(draft.plotId);
     const survivalRate = calcSurvivalRate(draft.aliveCount, total);
+    // 只改正初录笔误：retest（复测更正）原样保留，生效口径仍由复测优先
     await putSurvey({
       ...existing,
       plotId: draft.plotId,
@@ -120,6 +133,16 @@ export const useSurveyStore = create<SurveyStoreState>((set, get) => ({
       avgHeightCm: draft.avgHeightCm,
       survivalRate,
     });
+    set({ revision: get().revision + 1 });
+  },
+
+  async saveRetest(surveyId, draft) {
+    await putSurveyRetest(surveyId, draft);
+    set({ revision: get().revision + 1 });
+  },
+
+  async deleteRetest(surveyId) {
+    await clearSurveyRetest(surveyId);
     set({ revision: get().revision + 1 });
   },
 

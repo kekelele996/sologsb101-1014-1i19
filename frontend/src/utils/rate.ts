@@ -5,7 +5,7 @@
  * - 栽植密度合理性校验阈值
  * - 株高增幅与补植建议
  */
-import { RATE_LEVEL_LABEL, type RateLevel } from '../types/survey';
+import { RATE_LEVEL_LABEL, type RateLevel, type Survey } from '../types/survey';
 
 /** 1 亩 = 666.6667 平方米 */
 export const MU_TO_M2 = 666.6667;
@@ -52,6 +52,40 @@ export function rateLevel(rate: number): RateLevel {
   if (rate >= SURVIVAL_GOOD_RATE) return 'good';
   if (rate >= SURVIVAL_WARN_RATE) return 'fair';
   return 'poor';
+}
+
+/* --------------------------- 复测更正：生效值口径 --------------------------- */
+
+/** 生效成活株数：有复测取复测值，否则取初录 */
+export function effectiveAliveCount(survey: Pick<Survey, 'aliveCount' | 'retest'>): number {
+  return survey.retest ? survey.retest.aliveCount : survey.aliveCount;
+}
+
+/** 生效平均株高：有复测取复测值，否则取初录 */
+export function effectiveHeight(survey: Pick<Survey, 'avgHeightCm' | 'retest'>): number {
+  return survey.retest ? survey.retest.avgHeightCm : survey.avgHeightCm;
+}
+
+/** 是否存在复测更正 */
+export function hasRetest(survey: Pick<Survey, 'retest'>): boolean {
+  return survey.retest !== null;
+}
+
+/**
+ * 生效成活率（%）：有复测时按复测成活株数重算，无复测回落到初录成活率。
+ * totalCount 为该地块栽植总株数；缺失（0 或拿不到）时直接返回记录上的初录值兜底。
+ */
+export function effectiveRate(survey: Survey, totalCount: number): number {
+  if (survey.retest) return calcSurvivalRate(survey.retest.aliveCount, totalCount);
+  return totalCount > 0 ? calcSurvivalRate(survey.aliveCount, totalCount) : survey.survivalRate;
+}
+
+/**
+ * 生效等级：人工调整过的等级只作用于生效值（不随初录/复测切换而丢失）；
+ * 未人工调整时按生效成活率自动判定。
+ */
+export function effectiveGrade(survey: Pick<Survey, 'grade' | 'gradeManual' | 'retest'>, rate: number): RateLevel {
+  return survey.gradeManual ? survey.grade : rateLevel(rate);
 }
 
 /** 等级中文名 */

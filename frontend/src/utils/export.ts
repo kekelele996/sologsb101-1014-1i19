@@ -10,7 +10,7 @@ import type { Planting } from '../types/planting';
 import type { Seedling } from '../types/seedling';
 import type { Replant } from '../types/replant';
 import { RATE_LEVEL_LABEL } from '../types/survey';
-import { calcSurvivalRate, percentText, round1 } from './rate';
+import { effectiveGrade, effectiveRate, percentText, round1 } from './rate';
 import { stampSuffix } from './id';
 
 /** 触发浏览器下载 */
@@ -96,10 +96,14 @@ export function exportSummaryCsv(
     '栽植总株数(株)',
     '测次数',
     '最新测次',
-    '最新成活株数',
-    '最新成活率(%)',
+    '初录成活株数',
+    '复测日期',
+    '复测成活株数',
+    '生效成活株数',
+    '生效成活率(%)',
     '判定等级',
-    '平均株高(cm)',
+    '生效平均株高(cm)',
+    '复测说明',
     '缺株数(株)',
     '补植计划数',
     '最近补植日期',
@@ -112,7 +116,10 @@ export function exportSummaryCsv(
     const plotReplants = replants.filter((row) => row.plotId === plot.id);
     const total = plotPlantings.reduce((acc, row) => acc + row.count, 0);
     const latest = plotSurveys.length > 0 ? plotSurveys[plotSurveys.length - 1] : null;
-    const rate = latest ? calcSurvivalRate(latest.aliveCount, total) : 0;
+    // 汇总口径与页面一致：有复测按复测生效，无复测按初录
+    const rate = latest ? effectiveRate(latest, total) : 0;
+    const effectiveAlive = latest && latest.retest ? latest.retest.aliveCount : latest?.aliveCount ?? 0;
+    const effectiveHeightValue = latest && latest.retest ? latest.retest.avgHeightCm : latest?.avgHeightCm ?? 0;
     lines.push(
       [
         plot.name,
@@ -127,9 +134,13 @@ export function exportSummaryCsv(
         plotSurveys.length,
         latest ? `第 ${latest.round} 测次` : '未验收',
         latest ? latest.aliveCount : 0,
-        round1(rate),
-        latest ? RATE_LEVEL_LABEL[latest.grade] : '—',
-        latest ? latest.avgHeightCm : 0,
+        latest?.retest ? latest.retest.date : '',
+        latest?.retest ? latest.retest.aliveCount : '',
+        latest ? effectiveAlive : 0,
+        latest ? round1(rate) : 0,
+        latest ? RATE_LEVEL_LABEL[effectiveGrade(latest, rate)] : '—',
+        latest ? effectiveHeightValue : 0,
+        latest?.retest ? latest.retest.note : '',
         plot.missingCount,
         plotReplants.length,
         plot.lastReplantDate || '—',
@@ -179,12 +190,12 @@ export function buildSummaryText(
     const total = plantings.filter((row) => row.plotId === plot.id).reduce((acc, row) => acc + row.count, 0);
     const plotSurveys = surveys.filter((row) => row.plotId === plot.id).sort((a, b) => a.round - b.round);
     const latest = plotSurveys.length > 0 ? plotSurveys[plotSurveys.length - 1] : null;
-    const rate = latest ? calcSurvivalRate(latest.aliveCount, total) : 0;
+    const rate = latest ? effectiveRate(latest, total) : 0;
     const pending = replants.filter((row) => row.plotId === plot.id && row.state !== '已复核').length;
     lines.push(
       `· ${plot.name}（${plot.tideZone}潮位带 / ${plot.substrate}）栽植 ${total} 株，最新成活率 ${
         latest ? percentText(rate) : '未验收'
-      }，缺株 ${plot.missingCount} 株，待办补植 ${pending} 条`,
+      }${latest?.retest ? '（已按复测更正生效）' : ''}，缺株 ${plot.missingCount} 株，待办补植 ${pending} 条`,
     );
   });
   return lines.join('\n');

@@ -1,7 +1,7 @@
 /**
  * IndexedDB 持久化层（Dexie 封装）
  * - 数据库名：gbmangrove
- * - 含数据结构版本号与 v1 → v2 升级迁移逻辑（升级时按 version().stores() 补齐索引）
+ * - 含数据结构版本号与 v1 → v2 → v3 升级迁移逻辑（升级时按 version().stores() 补齐索引 / 字段）
  * - 提供各表增删改查、整库快照导入导出与重置
  * 纯前端应用：不依赖任何后端服务或外部接口。
  */
@@ -9,9 +9,9 @@ import Dexie, { type Table } from 'dexie';
 import type { Plot } from '../types/plot';
 import type { Seedling } from '../types/seedling';
 import type { Planting } from '../types/planting';
-import type { Survey } from '../types/survey';
+import type { Survey, SurveyRetestDraft } from '../types/survey';
 import type { Replant, ReplantState } from '../types/replant';
-import { rateLevel } from './rate';
+import { effectiveAliveCount, effectiveGrade, effectiveRate, rateLevel } from './rate';
 import { nowIso, today } from './id';
 import { seedDatabase } from './seed';
 
@@ -19,7 +19,7 @@ import { seedDatabase } from './seed';
 export const DB_NAME = 'gbmangrove';
 
 /** 当前数据结构版本号（每次调整字段结构必须 +1 并补迁移） */
-export const DB_SCHEMA_VERSION = 2;
+export const DB_SCHEMA_VERSION = 3;
 
 /** 数据行结构修订号 */
 export const ROW_REVISION = 2;
@@ -81,6 +81,14 @@ class MangroveDatabase extends Dexie {
           if (typeof row.gradeManual !== 'boolean') row.gradeManual = false;
         });
       });
+
+    // ---------- v3：验收记录增加复测更正（初录保留，复测另存为生效值） ----------
+    this.version(DB_SCHEMA_VERSION).upgrade(async (tx) => {
+      await tx.table('surveys').toCollection().modify((row: Record<string, unknown>) => {
+        // 历史数据无复测：retest 置空，生效值照旧等于初录
+        if (row.retest === undefined) row.retest = null;
+      });
+    });
   }
 }
 
@@ -193,9 +201,59 @@ export async function listSurveysByPlot(plotId: string): Promise<Survey[]> {
   return rows.sort((a, b) => a.round - b.round);
 }
 
+/** 按地块汇总栽植总株数（供生效成活率重算使用） */
+async function plantedTotalOfPlot(plotId: string): Promise<number> {
+  const rows = await db.plantings.where('plotId').equals(plotId).toArray();
+  return rows.reduce((acc, row) => acc + row.count, 0);
+}
+
+/** 按生效成活率重算等级（人工等级保留），并返回可落库的最新行 */
+export function withEffectiveGrade(row: Survey, totalCount: number, stamp: string): Survey {
+  const rate = effectiveRate(row, totalCount);
+  return {
+    ...row,
+    grade: effectiveGrade(row, rate),
+    updatedAt: stamp,
+    revision: ROW_REVISION,
+  };
+}
+
 export async function putSurvey(row: Survey): Promise<void> {
-  const grade = row.gradeManual ? row.grade : rateLevel(row.survivalRate);
-  await db.surveys.put({ ...row, grade, updatedAt: nowIso(), revision: ROW_REVISION });
+  const totalCount = await plantedTotalOfPlot(row.plotId);
+  // 等级始终按「生效成活率」判定：有复测取复测，无复测取初录；人工调整过的等级保留
+  const next = withEffectiveGrade(row, totalCount, nowIso());
+  await db.surveys.put(next);
+}
+
+/** 登记 / 覆盖复测更正：一条测次至多一份，重复提交整体替换（以最后一次为准），初录读数不动 */
+export async function putSurveyRetest(surveyId: string, draft: SurveyRetestDraft): Promise<void> {
+  await db.transaction('rw', db.surveys, db.plantings, async () => {
+    const existing = await db.surveys.get(surveyId);
+    if (!existing) throw new Error('验收记录不存在，无法登记复测更正');
+    const totalCount = await plantedTotalOfPlot(existing.plotId);
+    const next: Survey = {
+      ...existing,
+      retest: {
+        date: draft.date,
+        aliveCount: draft.aliveCount,
+        avgHeightCm: draft.avgHeightCm,
+        note: draft.note.trim(),
+        updatedAt: nowIso(),
+      },
+    };
+    await db.surveys.put(withEffectiveGrade(next, totalCount, nowIso()));
+  });
+}
+
+/** 清除复测更正：该测次恢复按初录读数生效 */
+export async function clearSurveyRetest(surveyId: string): Promise<void> {
+  await db.transaction('rw', db.surveys, db.plantings, async () => {
+    const existing = await db.surveys.get(surveyId);
+    if (!existing || existing.retest === null) return;
+    const totalCount = await plantedTotalOfPlot(existing.plotId);
+    const next: Survey = { ...existing, retest: null };
+    await db.surveys.put(withEffectiveGrade(next, totalCount, nowIso()));
+  });
 }
 
 /** 批量调整成活率等级（人工复核覆盖） */
@@ -256,15 +314,26 @@ export async function applyReplantCompletion(replantId: string): Promise<void> {
     const surveys = await db.surveys.where('plotId').equals(plot.id).toArray();
     if (surveys.length === 0) return;
     const latest = surveys.reduce((acc, item) => (item.round > acc.round ? item : acc));
-    // 补植后按「原成活株数 + 本次补植株数」重新计算成活率
-    const aliveAfter = latest.aliveCount + replant.missingCount;
+    // 补植基数按「生效成活株数」：有复测取复测值，无复测取初录，避免复测更正被回写覆盖
+    const aliveAfter = effectiveAliveCount(latest) + replant.missingCount;
     const rate = total > 0 ? Math.round(Math.min(100, (aliveAfter / total) * 100) * 10) / 10 : latest.survivalRate;
-    await db.surveys.update(latest.id, {
-      aliveCount: aliveAfter,
-      survivalRate: rate,
-      grade: latest.gradeManual ? latest.grade : rateLevel(rate),
-      updatedAt: nowIso(),
-    });
+    const grade = effectiveGrade(latest, rate);
+    const stamp = nowIso();
+    if (latest.retest) {
+      // 生效值来自复测：更新复测读数并保留初录与复测说明不动
+      await db.surveys.update(latest.id, {
+        retest: { ...latest.retest, aliveCount: aliveAfter, updatedAt: stamp },
+        grade,
+        updatedAt: stamp,
+      });
+    } else {
+      await db.surveys.update(latest.id, {
+        aliveCount: aliveAfter,
+        survivalRate: rate,
+        grade,
+        updatedAt: stamp,
+      });
+    }
   });
 }
 
@@ -323,7 +392,9 @@ export async function importSnapshot(snapshot: DatabaseSnapshot): Promise<void> 
     await db.plots.bulkPut(snapshot.plots.map((row) => ({ ...row, revision: ROW_REVISION })));
     await db.seedlings.bulkPut(snapshot.seedlings.map((row) => ({ ...row, revision: ROW_REVISION })));
     await db.plantings.bulkPut(snapshot.plantings.map((row) => ({ ...row, revision: ROW_REVISION })));
-    await db.surveys.bulkPut(snapshot.surveys.map((row) => ({ ...row, revision: ROW_REVISION })));
+    await db.surveys.bulkPut(
+      snapshot.surveys.map((row) => ({ ...row, retest: row.retest ?? null, revision: ROW_REVISION })),
+    );
     await db.replants.bulkPut(snapshot.replants.map((row) => ({ ...row, revision: ROW_REVISION })));
   });
 }

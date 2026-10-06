@@ -7,7 +7,7 @@ import { db, ROW_REVISION } from './db';
 import type { Plot } from '../types/plot';
 import type { Seedling } from '../types/seedling';
 import type { Planting } from '../types/planting';
-import type { Survey } from '../types/survey';
+import type { Survey, SurveyRetestDraft } from '../types/survey';
 import type { Replant } from '../types/replant';
 import { calcSurvivalRate, rateLevel } from './rate';
 
@@ -32,12 +32,22 @@ function plantingRow(row: Omit<Planting, 'createdAt' | 'updatedAt' | 'revision'>
   return { ...row, createdAt: SEED_TIME, updatedAt: SEED_TIME, revision: ROW_REVISION };
 }
 
-function surveyRow(row: Omit<Survey, 'createdAt' | 'updatedAt' | 'revision' | 'grade' | 'gradeManual' | 'survivalRate'>, total: number): Survey {
+function surveyRow(
+  row: Omit<Survey, 'createdAt' | 'updatedAt' | 'revision' | 'grade' | 'gradeManual' | 'survivalRate' | 'retest'> & {
+    retest?: SurveyRetestDraft;
+  },
+  total: number,
+): Survey {
   const survivalRate = calcSurvivalRate(row.aliveCount, total);
+  const retestDraft = row.retest;
+  const effectiveRateValue = retestDraft ? calcSurvivalRate(retestDraft.aliveCount, total) : survivalRate;
   return {
     ...row,
+    retest: retestDraft
+      ? { ...retestDraft, note: retestDraft.note, updatedAt: SEED_TIME }
+      : null,
     survivalRate,
-    grade: rateLevel(survivalRate),
+    grade: rateLevel(effectiveRateValue),
     gradeManual: false,
     createdAt: SEED_TIME,
     updatedAt: SEED_TIME,
@@ -129,7 +139,24 @@ export async function seedDatabase(): Promise<void> {
     surveyRow({ id: 'survey-b1', plotId: SEED_IDS.plotB, round: 1, date: '2024-07-05', aliveCount: 2772, avgHeightCm: 41 }, totalByPlot[SEED_IDS.plotB]),
     surveyRow({ id: 'survey-b2', plotId: SEED_IDS.plotB, round: 2, date: '2024-10-12', aliveCount: 2112, avgHeightCm: 55 }, totalByPlot[SEED_IDS.plotB]),
     surveyRow({ id: 'survey-c1', plotId: SEED_IDS.plotC, round: 1, date: '2024-05-28', aliveCount: 7680, avgHeightCm: 70 }, totalByPlot[SEED_IDS.plotC]),
-    surveyRow({ id: 'survey-c2', plotId: SEED_IDS.plotC, round: 2, date: '2024-08-30', aliveCount: 7440, avgHeightCm: 88 }, totalByPlot[SEED_IDS.plotC]),
+    // 验收后发现现场计数仪存在 +3.7% 偏差，复测更正：初录 7440/88cm 保留，生效值改按 6720/86cm
+    surveyRow(
+      {
+        id: 'survey-c2',
+        plotId: SEED_IDS.plotC,
+        round: 2,
+        date: '2024-08-30',
+        aliveCount: 7440,
+        avgHeightCm: 88,
+        retest: {
+          date: '2024-10-12',
+          aliveCount: 6720,
+          avgHeightCm: 86,
+          note: '验收后送检发现便携式计数仪存在正偏差，2024-10-12 组织人工复测，按复测结果更正；初录读数保留备查。',
+        },
+      },
+      totalByPlot[SEED_IDS.plotC],
+    ),
   ];
 
   // ---------------- 补植计划（每地块 1 条，覆盖三种状态） ----------------

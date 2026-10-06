@@ -10,21 +10,39 @@ import { db, initDatabase } from '../utils/db';
 import {
   SURVIVAL_WARN_RATE,
   calcSurvivalRate,
+  effectiveAliveCount,
+  effectiveGrade,
+  effectiveHeight,
+  effectiveRate,
   heightGrowth,
-  rateLevel,
   round1,
   suggestReplantCount,
 } from '../utils/rate';
 
-/** 单个测次的成活率数据点 */
+/** 单个测次的成活率数据点（全部字段为「生效值」：有复测取复测，无复测取初录） */
 export interface SurvivalPoint {
   surveyId: string;
   round: number;
+  /** 初录验收日期 */
   date: string;
+  /** 生效成活株数（复测值优先） */
   aliveCount: number;
+  /** 生效平均株高（复测值优先） */
   avgHeightCm: number;
-  /** 该测次的成活率（%） */
+  /** 生效成活率（%） */
   rate: number;
+  /** 是否存在复测更正 */
+  retested: boolean;
+  /** 复测日期（无复测为 null） */
+  retestDate: string | null;
+  /** 复测说明 */
+  retestNote: string;
+  /** 初录成活株数（仅供「原值 → 生效值」对照展示） */
+  initialAliveCount: number;
+  /** 初录平均株高 */
+  initialHeightCm: number;
+  /** 初录成活率（%） */
+  initialRate: number;
   /** 是否被人工复核过等级 */
   gradeManual: boolean;
   level: RateLevel;
@@ -72,16 +90,25 @@ export function buildSurvivalSummary(
     .filter((row) => row.plotId === plotId)
     .sort((a, b) => a.round - b.round)
     .map((row) => {
-      const rate = totalCount > 0 ? calcSurvivalRate(row.aliveCount, totalCount) : row.survivalRate;
+      // 生效值口径：有复测取复测的成活株数 / 株高并重算成活率；无复测照旧按初录
+      const rate = effectiveRate(row, totalCount);
+      const alive = effectiveAliveCount(row);
+      const height = effectiveHeight(row);
       return {
         surveyId: row.id,
         round: row.round,
         date: row.date,
-        aliveCount: row.aliveCount,
-        avgHeightCm: row.avgHeightCm,
+        aliveCount: alive,
+        avgHeightCm: height,
         rate,
+        retested: row.retest !== null,
+        retestDate: row.retest ? row.retest.date : null,
+        retestNote: row.retest ? row.retest.note : '',
+        initialAliveCount: row.aliveCount,
+        initialHeightCm: row.avgHeightCm,
+        initialRate: totalCount > 0 ? calcSurvivalRate(row.aliveCount, totalCount) : row.survivalRate,
         gradeManual: row.gradeManual,
-        level: row.gradeManual ? row.grade : rateLevel(rate),
+        level: effectiveGrade(row, rate),
       };
     });
 
